@@ -313,7 +313,7 @@ class HttpToolsProtocol(asyncio.Protocol):
     def on_response_complete(self) -> None:
         # Callback for pipelined HTTP requests to be started.
         self.server_state.total_requests += 1
-
+        self.logger.info(f"reif +1 httptools: {self.server_state.total_requests}")
         if self.transport.is_closing():
             return
 

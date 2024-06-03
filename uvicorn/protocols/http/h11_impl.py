@@ -5,7 +5,7 @@ import http
 import logging
 from typing import Any, Callable, Literal, cast
 from urllib.parse import unquote
-
+import inspect
 import h11
 from h11._connection import DEFAULT_MAX_INCOMPLETE_EVENT_SIZE
 
@@ -34,6 +34,15 @@ from uvicorn.protocols.utils import (
     is_ssl,
 )
 from uvicorn.server import ServerState
+
+def caller_function():
+    stack = inspect.stack()
+    callers = []
+    for i in range(1, 10):  # Skip 0 because it's the current function
+        if i < len(stack):
+            function_name = stack[i][3]
+            callers.append(function_name)
+    return callers
 
 
 def _get_status_phrase(status_code: int) -> bytes:
@@ -113,13 +122,15 @@ class H11Protocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.connections.discard(self)
-
+        self.logger.info(f"reif uvicorn connection_lost __call__ This function was called by {caller_function()}")
+        # self.logger.info("reif connection_lost")
         if self.logger.level <= TRACE_LOG_LEVEL:
             prefix = "%s:%d - " % self.client if self.client else ""
             self.logger.log(TRACE_LOG_LEVEL, "%sHTTP connection lost", prefix)
 
         if self.cycle and not self.cycle.response_complete:
             self.cycle.disconnected = True
+            self.logger.info(f"reif connection_lost self.cycle.disconnected {self.cycle}")
         if self.conn.our_state != h11.ERROR:
             event = h11.ConnectionClosed()
             try:
@@ -137,6 +148,7 @@ class H11Protocol(asyncio.Protocol):
             self._unset_keepalive_if_required()
 
     def eof_received(self) -> None:
+        self.logger.info(f"reif EOF eof_received")
         pass
 
     def _unset_keepalive_if_required(self) -> None:
@@ -167,6 +179,7 @@ class H11Protocol(asyncio.Protocol):
         return True
 
     def data_received(self, data: bytes) -> None:
+        self.logger.info(f"reif data_received: {data}")
         self._unset_keepalive_if_required()
 
         self.conn.receive_data(data)
@@ -176,6 +189,7 @@ class H11Protocol(asyncio.Protocol):
         while True:
             try:
                 event = self.conn.next_event()
+                self.logger.info(f"reif handle_events {event}")
             except h11.RemoteProtocolError:
                 msg = "Invalid HTTP request received."
                 self.logger.warning(msg)
@@ -266,9 +280,11 @@ class H11Protocol(asyncio.Protocol):
                 self.cycle.message_event.set()
 
             elif isinstance(event, h11.EndOfMessage):
+                self.logger.info(f"reif isinstance EndOfMessage: {event}")
                 if self.conn.our_state is h11.DONE:
                     self.transport.resume_reading()
                     self.conn.start_next_cycle()
+                    self.logger.info(f"reif isinstance EndOfMessage continue")
                     continue
                 self.cycle.more_body = False
                 self.cycle.message_event.set()
@@ -312,7 +328,7 @@ class H11Protocol(asyncio.Protocol):
 
     def on_response_complete(self) -> None:
         self.server_state.total_requests += 1
-
+        self.logger.info(f"reif h11 +1: {self.server_state.total_requests}")
         if self.transport.is_closing():
             return
 
@@ -451,10 +467,12 @@ class RequestResponseCycle:
     async def send(self, message: ASGISendEvent) -> None:
         message_type = message["type"]
 
+        self.logger.info(f"reif uvicorn send {message}")
         if self.flow.write_paused and not self.disconnected:
             await self.flow.drain()
 
         if self.disconnected:
+            self.logger.info(f"reif send self.disconnected: {message}")
             return
 
         if not self.response_started:
@@ -486,10 +504,13 @@ class RequestResponseCycle:
             # Write response status line and headers
             reason = STATUS_PHRASES[status]
             response = h11.Response(status_code=status, headers=headers, reason=reason)
+            self.logger.info(f"reif send response {response}")
             output = self.conn.send(event=response)
+            self.logger.info(f"reif send output {output}")
             self.transport.write(output)
 
         elif not self.response_complete:
+            self.logger.info("reif not response complete: {message}")
             # Sending response body
             if message_type != "http.response.body":
                 msg = "Expected ASGI message 'http.response.body', but got '%s'."
@@ -510,6 +531,7 @@ class RequestResponseCycle:
                 self.message_event.set()
                 output = self.conn.send(event=h11.EndOfMessage())
                 self.transport.write(output)
+                self.logger.info("reif Handle response completion {output}")
 
         else:
             # Response already sent
@@ -517,12 +539,15 @@ class RequestResponseCycle:
             raise RuntimeError(msg % message_type)
 
         if self.response_complete:
+            self.logger.info("reif response_complete: {message}")
             if self.conn.our_state is h11.MUST_CLOSE or not self.keep_alive:
+                self.logger.info("reif keep_alive: {message}")
                 self.conn.send(event=h11.ConnectionClosed())
                 self.transport.close()
             self.on_response()
 
     async def receive(self) -> ASGIReceiveEvent:
+        self.logger.info("reif uvicorn receive!!")
         if self.waiting_for_100_continue and not self.transport.is_closing():
             headers: list[tuple[str, str]] = []
             event = h11.InformationalResponse(status_code=100, headers=headers, reason="Continue")
